@@ -133,39 +133,3 @@ def load_msumg(msumg_pkl):
         "label": label, 
         "meta": meta
     }
-
-
-def load_rki(rki_pkl):
-    """
-    Load the RKI dataset from a PKL file.
-
-    Parameters
-    ----------
-    rki_pkl : str or pathlib.Path
-        Path to the PKL file containing the RKI dataset.
-
-    Returns
-    -------
-    dict
-        {
-            "data": np.ndarray,
-            "label": np.ndarray,
-            "meta": pd.DataFrame
-        }
-        The metadata includes a fixed 'hospital' column set to "RKI".
-    """
-
-    rki = load_pkl(rki_pkl)
-    data, label, meta = rki["data"], rki["label"], pd.DataFrame.from_records(list(rki["meta"]))
-
-    meta.insert(
-        loc=0,
-        column="hospital",
-        value="RKI"
-    )
-
-    return {
-        "data": data, 
-        "label": label, 
-        "meta": meta
-    }

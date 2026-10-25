@@ -9,6 +9,10 @@ MALDIPerturb is a small PyTorch research codebase for bacterial species identifi
 - L∞ adversarial attacks (**FGSM**, **PGD**) and **adversarial training**,
 - a ready-to-run experiment: *adversarial training in low-data regimes* (k spectra per species), across centers, seeds and perturbation budgets, plus a plotting script.
 
+<p align="center">
+  <img src="docs/overview.png" alt="Overview of MALDIPerturb: adversarial perturbations of MALDI-TOF spectra and adversarial training of species classifiers" width="800">
+</p>
+
 ---
 
 ## Repository structure

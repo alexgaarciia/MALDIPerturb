@@ -102,3 +102,100 @@ class MLPClassifier_Extended(MLPClassifier):
         
         if best_state is not None:
             self.load_state_dict(best_state)
+
+class RiboClassifier(nn.Module):
+    def __init__(self, input_dim, n_ribotypes):
+        super().__init__()
+        self.input_dim = input_dim
+        self.n_ribotypes = n_ribotypes
+
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 512), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(512, 64), nn.ReLU(), nn.Dropout(0.3),
+            nn.Linear(64, n_ribotypes)
+        )
+
+    def forward(self, x):
+        x = self.net(x)
+        return x
+
+class RiboClassifier_Extended(RiboClassifier):
+    def __init__(self, input_dim, n_ribotypes, epochs, lr, patience):
+        super().__init__(input_dim, n_ribotypes)
+        self.epochs = epochs
+        self.lr = lr
+        self.patience = patience
+
+        self.optimizer = optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-4)
+        self.loss = nn.CrossEntropyLoss()
+
+        self.loss_during_training = []
+        self.val_loss_during_training = []
+
+    def trainloop(self, trainloader, validloader, device):
+        self.to(device)
+
+        best_val_loss = float("inf")
+        patience_counter = 0
+        best_state = None
+
+        for epoch in range(self.epochs):
+            train_loss, val_loss = 0, 0
+
+            # =======================
+            #        TRAIN
+            # =======================
+            self.train()
+            for batch in trainloader:
+                x, ribotype_id = batch
+                x, ribotype_id = x.to(device), ribotype_id.to(device)
+
+                self.optimizer.zero_grad()
+                pred = self.forward(x)
+                loss = self.loss(pred, ribotype_id)
+                loss.backward()
+                self.optimizer.step()
+
+                train_loss += loss.item()
+        
+            train_loss /= len(trainloader)
+
+            # =======================
+            #      VALIDATION
+            # =======================
+            self.eval()
+            
+            with torch.no_grad():
+                for batch in validloader:
+                    x, ribotype_id = batch
+                    x, ribotype_id = x.to(device), ribotype_id.to(device)
+                    pred = self.forward(x)
+                    loss = self.loss(pred, ribotype_id)
+                    val_loss += loss.item()
+            
+            val_loss /= len(validloader)
+
+            self.loss_during_training.append(train_loss)
+            self.val_loss_during_training.append(val_loss)
+
+            if (epoch + 1) % 10 == 0:
+                print(
+                    f"Epoch {epoch+1}/{self.epochs} | "
+                    f"Train Loss: {train_loss} | Validation Loss: {val_loss}")
+
+            # =======================
+            #     EARLY STOPPING
+            # =======================
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = copy.deepcopy(self.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= self.patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                break
+        
+        if best_state is not None:
+            self.load_state_dict(best_state)

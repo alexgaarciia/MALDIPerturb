@@ -15,3 +15,13 @@ def predict(model, X, device, bs=2048):
             xb = torch.tensor(X[i:i + bs], dtype=torch.float32).to(device)
             out.append(model(xb).argmax(dim=1).cpu().numpy())
     return np.concatenate(out)
+
+def predict_proba(model, X, device, bs=2048):
+    model.eval()
+    out = []
+    with torch.no_grad():
+        for i in range(0, len(X), bs):
+            xb = torch.tensor(X[i:i + bs], dtype=torch.float32).to(device)
+            proba = torch.softmax(model(xb), dim=1)
+            out.append(proba.cpu().numpy())
+    return np.concatenate(out)

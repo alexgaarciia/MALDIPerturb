@@ -1,7 +1,9 @@
 import copy
+import numpy as np
 import pandas as pd
 
 from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import roc_auc_score
 
 import torch
 import torch.nn.functional as F
@@ -79,6 +81,7 @@ def pgd_attack(model, x, y, eps, alpha, steps, random_start=True):
         loss  = F.cross_entropy(model(x_adv), y)
         grad  = torch.autograd.grad(loss, x_adv)[0]
         x_adv = x_adv + alpha * grad.sign()
+        
         # Project back onto the L-inf ball around x_orig
         delta = torch.clamp(x_adv - x_orig, min=-eps, max=eps)
         x_adv = clamp01(x_orig + delta)
@@ -105,7 +108,7 @@ def eval_under_attack(model, X_te, y_te, attack_fn, device, batch_size=256):
         float: balanced accuracy score on adversarial examples.
     """
     model.eval()
-    all_preds, all_true = [], []
+    all_preds, all_true, all_proba = [], [], []
 
     loader = DataLoader(
         TensorDataset(
@@ -119,16 +122,28 @@ def eval_under_attack(model, X_te, y_te, attack_fn, device, batch_size=256):
         x_batch, y_batch = x_batch.to(device), y_batch.to(device)
         x_adv = attack_fn(x_batch, y_batch)
         with torch.no_grad():
-            preds = model(x_adv).argmax(dim=1).cpu().numpy()
+            logits = model(x_adv)
+            proba  = torch.softmax(logits, dim=1).cpu().numpy()
+            preds  = logits.argmax(dim=1).cpu().numpy()
         all_preds.extend(preds)
         all_true.extend(y_batch.cpu().numpy())
+        all_proba.extend(proba)
 
-    return balanced_accuracy_score(all_true, all_preds)
+    ba = balanced_accuracy_score(all_true, all_preds)
+    all_proba = np.array(all_proba)
+    try:
+        if all_proba.shape[1] == 2:
+            auc = roc_auc_score(all_true, all_proba[:, 1])
+        else:
+            auc = roc_auc_score(all_true, all_proba, multi_class="ovr", average="macro")
+    except ValueError:
+        auc = np.nan
 
-def sweep_attacks(models_dict, X_te, y_te, eps_list,
-                  pgd_steps_list=(10, 40), device="cpu"):
+    return ba, auc
+
+def sweep_attacks(models_dict, X_te, y_te, eps_list, pgd_steps_list=(10, 40), device="cpu"):
     """Sweeps multiple adversarial attacks across a range of epsilon values
-    for each model, returning a DataFrame with balanced accuracy results.
+    for each model, returning a DataFrame with balanced accuracy and AUC results.
 
     For each model and each epsilon, evaluates:
         - Clean accuracy (no attack, only at eps=0)
@@ -148,7 +163,7 @@ def sweep_attacks(models_dict, X_te, y_te, eps_list,
         device (torch.device or str): device for computation. Default: "cpu".
 
     Returns:
-        pd.DataFrame: columns [model, attack, epsilon, balanced_accuracy].
+        pd.DataFrame: columns [model, attack, epsilon, balanced_accuracy, auc].
     """
     rows = []
 
@@ -156,45 +171,38 @@ def sweep_attacks(models_dict, X_te, y_te, eps_list,
         print(f"\n--- Model: {model_name} ---")
 
         # Clean (no attack)
-        ba_clean = eval_under_attack(
-            model, X_te, y_te,
-            attack_fn=lambda x, y: x,
-            device=device,
-        )
-        rows.append({"model": model_name, "attack": "Clean",
-                     "epsilon": 0.0, "balanced_accuracy": ba_clean})
-        print(f"  Clean BA: {ba_clean:.4f}")
+        ba_clean, auc_clean = eval_under_attack(model, X_te, y_te, attack_fn=lambda x, y: x, device=device)
+        rows.append({"model": model_name, "attack": "Clean", "epsilon": 0.0, "balanced_accuracy": ba_clean, "auc": auc_clean})
+        print(f"  Clean BA={ba_clean:.4f} AUC={auc_clean:.4f}")
 
         for eps in eps_list:
             if eps == 0.0:
                 continue
 
             # FGSM
-            ba_fgsm = eval_under_attack(
+            ba_fgsm, auc_fgsm = eval_under_attack(
                 model, X_te, y_te,
                 attack_fn=lambda x, y, e=eps: fgsm_attack(model, x, y, e),
                 device=device,
             )
-            rows.append({"model": model_name, "attack": "FGSM",
-                         "epsilon": eps, "balanced_accuracy": ba_fgsm})
-            print(f"  ε={eps:.3f} FGSM  BA={ba_fgsm:.4f}")
+            rows.append({"model": model_name, "attack": "FGSM", "epsilon": eps, "balanced_accuracy": ba_fgsm, "auc": auc_fgsm})
+            print(f"  ε={eps:.3f} FGSM  BA={ba_fgsm:.4f} AUC={auc_fgsm:.4f}")
 
             # PGD with varying number of steps
             for steps in pgd_steps_list:
                 alpha = eps / 4
-                ba_pgd = eval_under_attack(
+                ba_pgd, auc_pgd = eval_under_attack(
                     model, X_te, y_te,
                     attack_fn=lambda x, y, e=eps, a=alpha, s=steps: pgd_attack(
                         model, x, y, e, a, s, random_start=True),
                     device=device,
                 )
-                rows.append({"model": model_name, "attack": f"PGD-{steps}",
-                             "epsilon": eps, "balanced_accuracy": ba_pgd})
-                print(f"  ε={eps:.3f} PGD-{steps} BA={ba_pgd:.4f}")
+                rows.append({"model": model_name, "attack": f"PGD-{steps}", "epsilon": eps, "balanced_accuracy": ba_pgd, "auc": auc_pgd})
+                print(f"  ε={eps:.3f} PGD-{steps} BA={ba_pgd:.4f} AUC={auc_pgd:.4f}")
 
     return pd.DataFrame(rows)
 
-def train_adversarial(model, trainloader, validloader, device, eps=0.02, adv_lambda=0.5, epochs=50, lr=1e-3, patience=10, attack="fgsm", pgd_steps=10):
+def train_adversarial(model, trainloader, validloader, device, eps=0.02, adv_lambda=0.5, epochs=50, lr=1e-3, patience=10, attack="fgsm", pgd_steps=10, class_weights=None):
     """Trains a classifier with adversarial data augmentation and early stopping.
 
     For each batch, generates an adversarial example using FGSM or PGD and
@@ -224,13 +232,16 @@ def train_adversarial(model, trainloader, validloader, device, eps=0.02, adv_lam
     best_state       = None
     model.to(device)
 
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+
     for epoch in range(epochs):
         model.train()
         tr_loss = 0.0
         for x, y in trainloader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
-            loss_clean = F.cross_entropy(model(x), y)
+            loss_clean = F.cross_entropy(model(x), y, weight=class_weights)
 
             if attack == "pgd":
                 x_adv = x + torch.empty_like(x).uniform_(-eps, eps)
@@ -251,7 +262,7 @@ def train_adversarial(model, trainloader, validloader, device, eps=0.02, adv_lam
                 x_adv = x_adv.detach()
 
             optimizer.zero_grad()
-            loss_adv = F.cross_entropy(model(x_adv), y)
+            loss_adv = F.cross_entropy(model(x_adv), y, weight=class_weights)
             loss = (1.0 - adv_lambda) * loss_clean + adv_lambda * loss_adv
             loss.backward()
             optimizer.step()
@@ -263,7 +274,7 @@ def train_adversarial(model, trainloader, validloader, device, eps=0.02, adv_lam
         with torch.no_grad():
             for x, y in validloader:
                 x, y = x.to(device), y.to(device)
-                val_loss += F.cross_entropy(model(x), y).item()
+                val_loss += F.cross_entropy(model(x), y, weight=class_weights).item()
         val_loss /= len(validloader)
 
         if (epoch + 1) % 10 == 0:

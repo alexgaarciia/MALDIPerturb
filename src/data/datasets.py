@@ -133,31 +133,3 @@ def load_msumg(msumg_pkl):
         "label": label, 
         "meta": meta
     }
-
-def load_clostris(cdifficile_pkl):
-    """
-    Load a C. difficile dataset from a PKL file.
-
-    Parameters
-    ----------
-    cdifficile_pkl : str or pathlib.Path
-        Path to the PKL file containing the C. difficile dataset.
-
-    Returns
-    -------
-    dict
-        {
-            "data": np.ndarray,
-            "label": np.ndarray,
-            "meta": pd.DataFrame
-        }
-    """
-
-    cdifficile = load_pkl(cdifficile_pkl)
-    data, label, meta = cdifficile["data"], cdifficile["label"], pd.DataFrame.from_records(list(cdifficile["meta"]))
-
-    return {
-        "data": data, 
-        "label": label, 
-        "meta": meta
-    }

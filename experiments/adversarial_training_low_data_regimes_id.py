@@ -1,6 +1,8 @@
 # ============================================================
 # IMPORTS
 # ============================================================
+import logging
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -9,7 +11,7 @@ import torch
 
 from datetime import datetime
 
-from sklearn.metrics import balanced_accuracy_score
+from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
@@ -29,11 +31,12 @@ timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 EXPERIMENT_DIR = Path(f"experiments/results/{timestamp}")
 EXPERIMENT_DIR.mkdir(parents=True, exist_ok=True)
+CM_DIR = EXPERIMENT_DIR / "confusion_matrices"
+CM_DIR.mkdir(exist_ok=True)
 OUT_PATH = EXPERIMENT_DIR / "mlp_lowdata_perspecies_grid.csv"
 SPECIES_PATH = EXPERIMENT_DIR / "species_used.txt"
 
 device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-print(f"Device: {device}")
 
 ADV_LAMBDA = 0.5
 EPS_LIST = [0.01, 0.02, 0.05, 0.1, 0.2]
@@ -43,6 +46,18 @@ K_LIST = [5, 10, 25, 50, 75, 100]
 K_MAX = max(K_LIST)
 MIN_SPECIES = 200
 TEST_FRAC = 0.3
+
+Path("logs").mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(f"logs/adv_training_lowdata.log"),
+    ]
+)
+logger = logging.getLogger(__name__)
+logger.info(f"Device: {device}")
 
 
 # ============================================================
@@ -59,6 +74,7 @@ counts = {c: pd.Series(d["label"]).value_counts() for c, d in raw.items()}
 species = sorted(set.intersection(*[set(s[s >= MIN_SPECIES].index) for s in counts.values()]))
 n_cls = len(species)
 species_counts = pd.DataFrame({c: counts[c].reindex(species) for c in raw})
+short_labels = [s.replace("_", " ") for s in species]
 
 le = LabelEncoder().fit(species)
 CENTERS = {}
@@ -66,14 +82,12 @@ for c, d in raw.items():
     m = np.isin(d["label"], species)
     CENTERS[c] = (row_minmax_normalize(d["data"][m]), le.transform(d["label"][m]))
 
-print(f"\n{n_cls} species with >={MIN_SPECIES} spectra in every center:")
-print(species_counts.to_string())
-print("\nSpectra per center after filtering:")
+logger.info(f"{n_cls} species with >={MIN_SPECIES} spectra in every center:")
+logger.info("\n" + species_counts.to_string())
+logger.info("Spectra per center after filtering:")
 for c, (X_c, y_c) in CENTERS.items():
-    print(f"  {c}: {len(y_c)}")
-print("\nSpecies used:")
-for s in species:
-    print(f"  {s}")
+    logger.info(f"  {c}: {len(y_c)}")
+logger.info("Species used: " + ", ".join(species))
 
 with open(SPECIES_PATH, "w") as f:
     f.write(f"Species used ({n_cls}), criterion: >= {MIN_SPECIES} spectra in each of: {', '.join(raw.keys())}\n\n")
@@ -84,7 +98,7 @@ with open(SPECIES_PATH, "w") as f:
     f.write("\n\nSpectra per center after filtering:\n")
     for c, (X_c, y_c) in CENTERS.items():
         f.write(f"{c}: {len(y_c)}\n")
-print(f"\nSpecies list saved: {SPECIES_PATH}")
+logger.info(f"Species list saved: {SPECIES_PATH}")
 
 
 # ============================================================
@@ -101,10 +115,10 @@ for center, (X_c, y_c) in CENTERS.items():
         order = {s: rng.permutation(np.where(y_pool == s)[0]) for s in range(n_cls)}
         min_pool = min(len(v) for v in order.values())
         need = K_MAX + max(2, K_MAX // 4)
-        print(f"\n##### {center} | seed={seed} | pool={len(X_pool)} | test={len(X_te)} | min per species in pool={min_pool} #####")
+        logger.info(f"##### {center} | seed={seed} | pool={len(X_pool)} | test={len(X_te)} | min per species in pool={min_pool} #####")
 
         if min_pool < need:
-            print(f"  [warning] smallest pool per species ({min_pool}) < {need}, skipping this center/seed")
+            logger.warning(f"smallest pool per species ({min_pool}) < {need}, skipping {center} seed={seed}")
             skipped.append(f"{center} seed={seed}: smallest pool per species {min_pool} < {need}")
             continue
 
@@ -118,7 +132,7 @@ for center, (X_c, y_c) in CENTERS.items():
             for attack, steps, eps in configs:
                 torch.manual_seed(seed)
                 np.random.seed(seed)
-                print(f"\n===== {center} | seed={seed} | k={k} | attack={attack} | steps={steps} | eps={eps} =====")
+                logger.info(f"{center} | seed={seed} | k={k} | attack={attack} | steps={steps} | eps={eps}")
 
                 mlp = MLPClassifier_Extended(input_dim=X_tr.shape[1], n_species=n_cls, epochs=200, lr=1e-3, patience=10)
                 trl = make_loader(X_tr, y_tr, shuffle=True)
@@ -132,8 +146,14 @@ for center, (X_c, y_c) in CENTERS.items():
                 mlp.to(device)
                 pred = predict(mlp, X_te, device)
                 ba = balanced_accuracy_score(y_te, pred)
-                print(f"BA test={ba:.4f}")
+                logger.info(f"BA test={ba:.4f}")
                 rows.append({"center": center, "seed": seed, "k": k, "n_train": k * n_cls, "attack": attack, "pgd_steps": steps, "eps": eps, "ba_test": ba})
+
+                cm = confusion_matrix(y_te, pred, labels=np.arange(n_cls))
+                tag = f"{center}_seed{seed}_k{k}_{attack}{steps}_eps{eps}"
+                cm_df = pd.DataFrame(cm, index=species, columns=species)
+                cm_df.to_csv(CM_DIR / f"{tag}.txt", sep="\t")
+                
             pd.DataFrame(rows).to_csv(OUT_PATH, index=False)
 
 with open(SPECIES_PATH, "a") as f:
@@ -144,6 +164,5 @@ with open(SPECIES_PATH, "a") as f:
     else:
         f.write("none\n")
 
-print(f"\nResults saved: {OUT_PATH}")
-print(f"Species list saved: {SPECIES_PATH}")
-print("\n===== Experiment completed successfully =====")
+logger.info(f"Results saved: {OUT_PATH}")
+logger.info("===== Experiment completed successfully =====")
